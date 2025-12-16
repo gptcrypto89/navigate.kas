@@ -12,6 +12,8 @@ import '../services/wallet_service.dart';
 import 'master_password_screen.dart';
 import '../services/kns_api_client.dart';
 import '../services/kaspa_explorer_client.dart';
+import '../services/kasplex_api_client.dart';
+import '../services/kaspa_nft_api_client.dart';
 import '../widgets/browser/certificate_info_dialog.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -32,6 +34,8 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
   bool _isLoadingDomains = false;
   final KNSApiClient _knsClient = KNSApiClient();
   final KaspaExplorerClient _explorerClient = KaspaExplorerClient();
+  final KasplexApiClient _kasplexClient = KasplexApiClient();
+  final KaspaNftApiClient _nftClient = KaspaNftApiClient();
   late TabController _tabController;
   bool _isFullScreen = true; // Track fullscreen state
   String _balance = "0.00";
@@ -51,6 +55,17 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
   // Domain DNS and Certificate cache
   Map<String, Map<String, dynamic>> _domainDnsCache = {};
   Map<String, Map<String, dynamic>> _domainCertCache = {};
+  // Tokens
+  List<KRC20Token> _tokens = [];
+  Map<String, KRC20TokenInfo> _tokenInfoMap = {};
+  bool _isLoadingTokens = false;
+  String? _tokensNextPage;
+  bool _hasMoreTokens = false;
+  // NFTs
+  List<NFTCollection> _nfts = [];
+  Map<String, double> _nftFloorPrices = {};
+  Map<String, String> _nftImageUrls = {}; // Cache for NFT image URLs
+  bool _isLoadingNfts = false;
 
   @override
   void initState() {
@@ -60,11 +75,6 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
     _checkFullScreen();
     print('ℹ️ WalletInfo: Initializing Wallet Info Screen');
     _loadWalletInfo();
-    
-    // Start periodic balance updates every 5 seconds
-    _balanceTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      _loadBalance();
-    });
   }
 
   @override
@@ -112,6 +122,8 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
       _loadDomains();
       _loadBalance();
       _loadTransactions();
+      _loadTokens();
+      _loadNfts();
     }
   }
 
@@ -238,6 +250,122 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
           ),
         );
       }
+    }
+  }
+
+  Future<void> _loadTokens({bool loadMore = false}) async {
+    if (_walletAddress == null || _walletAddress!.isEmpty) return;
+    if (_isLoadingTokens) return;
+    
+    setState(() {
+      _isLoadingTokens = true;
+    });
+
+    try {
+      final nextPage = loadMore ? _tokensNextPage : null;
+      print('\ud83d\udcb0 WalletInfo: Fetching tokens...');
+      final result = await _kasplexClient.getTokenList(_walletAddress!, next: nextPage);
+      
+      if (mounted) {
+        final newTokens = result.tokens;
+        
+        setState(() {
+          if (loadMore) {
+            _tokens.addAll(newTokens);
+          } else {
+            _tokens = newTokens;
+          }
+          _tokensNextPage = result.next;
+          _hasMoreTokens = result.hasMore;
+          _isLoadingTokens = false;
+        });
+        
+        // Load portfolio info (prices and logos) for the tokens
+        if (newTokens.isNotEmpty) {
+          final tickers = newTokens.map((t) => t.tick).toList();
+          final portfolio = await _kasplexClient.getPortfolio(tickers);
+          if (mounted) {
+            setState(() {
+              for (final info in portfolio) {
+                _tokenInfoMap[info.ticker] = info;
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print('\u274c WalletInfo: Error loading tokens: $e');
+      if (mounted) {
+        setState(() {
+          _isLoadingTokens = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadNfts() async {
+    if (_walletAddress == null || _walletAddress!.isEmpty) return;
+    if (_isLoadingNfts) return;
+    
+    setState(() {
+      _isLoadingNfts = true;
+    });
+
+    try {
+      print('\ud83d\uddbc\ufe0f WalletInfo: Fetching NFTs...');
+      final nfts = await _nftClient.getNFTs(_walletAddress!);
+      
+      if (mounted) {
+        setState(() {
+          _nfts = nfts;
+          _isLoadingNfts = false;
+        });
+        
+        // Load floor prices for all collections
+        if (nfts.isNotEmpty) {
+          final tickers = nfts.map((n) => n.ticker).toList();
+          final prices = await _nftClient.getFloorPrices(tickers);
+          if (mounted) {
+            setState(() {
+              _nftFloorPrices = prices;
+            });
+          }
+          
+          // Load preview images for each collection (first token)
+          for (final nft in nfts) {
+            if (nft.tokenIds.isNotEmpty) {
+              final firstTokenId = nft.tokenIds.first;
+              final cacheKey = '${nft.ticker}/$firstTokenId';
+              if (!_nftImageUrls.containsKey(cacheKey)) {
+                _loadNftImage(nft.ticker, firstTokenId);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('\u274c WalletInfo: Error loading NFTs: $e');
+      if (mounted) {
+        setState(() {
+          _isLoadingNfts = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadNftImage(String ticker, String tokenId) async {
+    final cacheKey = '$ticker/$tokenId';
+    if (_nftImageUrls.containsKey(cacheKey)) return;
+    
+    try {
+      final imageUrl = await _nftClient.getNftImageUrl(ticker, tokenId);
+      if (mounted && imageUrl != null) {
+        setState(() {
+          _nftImageUrls[cacheKey] = imageUrl;
+        });
+      }
+    } catch (e) {
+      print('\u274c Error loading NFT image for $cacheKey: $e');
     }
   }
 
@@ -645,8 +773,8 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
                     controller: _tabController,
                     children: [
                       _buildActivitiesTab(colorScheme),
-                      _buildComingSoonTab('Tokens'),
-                      _buildComingSoonTab('NFTs'),
+                      _buildTokensTab(colorScheme),
+                      _buildNftsTab(colorScheme),
                       _buildDomainsTab(colorScheme),
                     ],
                   ),
@@ -789,6 +917,545 @@ class _WalletInfoScreenState extends State<WalletInfoScreen> with SingleTickerPr
               fontSize: 16,
               color: colorScheme.onSurface.withOpacity(0.7),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTokensTab(ColorScheme colorScheme) {
+    return Column(
+      children: [
+        // Header
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+          decoration: BoxDecoration(
+            color: colorScheme.surface,
+            border: Border(
+              bottom: BorderSide(
+                color: colorScheme.outline.withOpacity(0.2),
+                width: 1,
+              ),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'KRC20 Tokens',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+              if (_isLoadingTokens)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+        ),
+        // Tokens List
+        Expanded(
+          child: _isLoadingTokens && _tokens.isEmpty
+              ? const Center(child: CircularProgressIndicator())
+              : _tokens.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24.0),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.token,
+                              size: 64,
+                              color: colorScheme.onSurface.withOpacity(0.3),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No tokens found',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: colorScheme.onSurface.withOpacity(0.7),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Your KRC20 tokens will appear here',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: colorScheme.onSurface.withOpacity(0.5),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : RefreshIndicator(
+                      onRefresh: () => _loadTokens(loadMore: false),
+                      child: ListView.builder(
+                        padding: const EdgeInsets.all(16.0),
+                        itemCount: _tokens.length + (_hasMoreTokens ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == _tokens.length) {
+                            return Padding(
+                              padding: const EdgeInsets.all(16.0),
+                              child: Center(
+                                child: ElevatedButton(
+                                  onPressed: _isLoadingTokens
+                                      ? null
+                                      : () => _loadTokens(loadMore: true),
+                                  child: _isLoadingTokens
+                                      ? const SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Text('Load More'),
+                                ),
+                              ),
+                            );
+                          }
+                          return _buildTokenCard(_tokens[index], colorScheme);
+                        },
+                      ),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTokenCard(KRC20Token token, ColorScheme colorScheme) {
+    final info = _tokenInfoMap[token.tick];
+    final balance = token.balanceFormatted;
+    final price = info?.price ?? 0.0;
+    final value = balance * price;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          children: [
+            // Token Logo
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: info?.logo != null
+                    ? Image.network(
+                        info!.logo!,
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) => Center(
+                          child: Text(
+                            token.tick.substring(0, token.tick.length > 2 ? 2 : token.tick.length),
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: colorScheme.primary,
+                            ),
+                          ),
+                        ),
+                      )
+                    : Center(
+                        child: Text(
+                          token.tick.substring(0, token.tick.length > 2 ? 2 : token.tick.length),
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: colorScheme.primary,
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            // Token Info
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    token.tick,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: colorScheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _formatTokenBalance(balance),
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: colorScheme.onSurface.withOpacity(0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Value
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (price > 0)
+                  Text(
+                    '${value.toStringAsFixed(2)} KAS',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: colorScheme.primary,
+                    ),
+                  ),
+                if (price > 0)
+                  Text(
+                    '\$${_formatPrice(price)}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colorScheme.onSurface.withOpacity(0.6),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTokenBalance(double balance) {
+    if (balance >= 1000000000) {
+      return '${(balance / 1000000000).toStringAsFixed(2)}B';
+    } else if (balance >= 1000000) {
+      return '${(balance / 1000000).toStringAsFixed(2)}M';
+    } else if (balance >= 1000) {
+      return '${(balance / 1000).toStringAsFixed(2)}K';
+    } else {
+      return balance.toStringAsFixed(2);
+    }
+  }
+
+  String _formatPrice(double price) {
+    if (price < 0.0001) {
+      return price.toStringAsExponential(2);
+    } else if (price < 0.01) {
+      return price.toStringAsFixed(6);
+    } else if (price < 1) {
+      return price.toStringAsFixed(4);
+    } else {
+      return price.toStringAsFixed(2);
+    }
+  }
+
+  Widget _buildNftsTab(ColorScheme colorScheme) {
+    return Column(
+      children: [
+        // Header
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+          decoration: BoxDecoration(
+            color: colorScheme.surface,
+            border: Border(
+              bottom: BorderSide(
+                color: colorScheme.outline.withOpacity(0.2),
+                width: 1,
+              ),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'NFT Collections',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+              if (_isLoadingNfts)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+        ),
+        // NFT Collections List
+        Expanded(
+          child: _isLoadingNfts && _nfts.isEmpty
+              ? const Center(child: CircularProgressIndicator())
+              : _nfts.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24.0),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.collections,
+                              size: 64,
+                              color: colorScheme.onSurface.withOpacity(0.3),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No NFTs found',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: colorScheme.onSurface.withOpacity(0.7),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Your NFT collections will appear here',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: colorScheme.onSurface.withOpacity(0.5),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : RefreshIndicator(
+                      onRefresh: () async {
+                        await _loadNfts();
+                      },
+                      child: ListView.builder(
+                        padding: const EdgeInsets.all(16.0),
+                        itemCount: _nfts.length,
+                        itemBuilder: (context, index) {
+                          return _buildNftCollectionCard(_nfts[index], colorScheme);
+                        },
+                      ),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNftImage(String ticker, String tokenId, double? size, ColorScheme colorScheme) {
+    final cacheKey = '$ticker/$tokenId';
+    final imageUrl = _nftImageUrls[cacheKey];
+    
+    if (imageUrl == null) {
+      // Image not loaded yet, show loading indicator
+      return Center(
+        child: SizedBox(
+          width: size != null ? size / 2 : 24,
+          height: size != null ? size / 2 : 24,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: colorScheme.primary,
+          ),
+        ),
+      );
+    }
+    
+    return Image.network(
+      imageUrl,
+      width: size,
+      height: size,
+      fit: BoxFit.cover,
+      loadingBuilder: (context, child, loadingProgress) {
+        if (loadingProgress == null) return child;
+        return Center(
+          child: SizedBox(
+            width: size != null ? size / 2 : 24,
+            height: size != null ? size / 2 : 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              value: loadingProgress.expectedTotalBytes != null
+                  ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                  : null,
+            ),
+          ),
+        );
+      },
+      errorBuilder: (context, error, stackTrace) => Center(
+        child: Icon(
+          Icons.image,
+          size: size != null ? size / 2 : 24,
+          color: colorScheme.onSurface.withOpacity(0.3),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNftCollectionCard(NFTCollection collection, ColorScheme colorScheme) {
+    final floorPrice = _nftFloorPrices[collection.ticker];
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: InkWell(
+        onTap: () => _showNftCollectionDetails(collection, colorScheme),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // NFT Preview (first token image)
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: _buildNftImage(
+                        collection.ticker,
+                        collection.tokenIds.first,
+                        64,
+                        colorScheme,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  // Collection Info
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          collection.ticker,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: colorScheme.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${collection.count} ${collection.count == 1 ? 'item' : 'items'}',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: colorScheme.onSurface.withOpacity(0.7),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Floor Price
+                  if (floorPrice != null)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          'Floor',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colorScheme.onSurface.withOpacity(0.5),
+                          ),
+                        ),
+                        Text(
+                          '${floorPrice.toStringAsFixed(0)} KAS',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: colorScheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.chevron_right,
+                    color: colorScheme.onSurface.withOpacity(0.5),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showNftCollectionDetails(NFTCollection collection, ColorScheme colorScheme) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(collection.ticker),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: GridView.builder(
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+            ),
+            itemCount: collection.tokenIds.length,
+            itemBuilder: (context, index) {
+              final tokenId = collection.tokenIds[index];
+              // Load image if not cached yet
+              final cacheKey = '${collection.ticker}/$tokenId';
+              if (!_nftImageUrls.containsKey(cacheKey)) {
+                _loadNftImage(collection.ticker, tokenId);
+              }
+              return Container(
+                decoration: BoxDecoration(
+                  color: colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _buildNftImage(
+                        collection.ticker,
+                        tokenId,
+                        null, // Full size
+                        colorScheme,
+                      ),
+                      Positioned(
+                        bottom: 4,
+                        right: 4,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.7),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            '#$tokenId',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
           ),
         ],
       ),

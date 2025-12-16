@@ -16,5 +16,13 @@ class AppConfig {
   static const String knsApiUrl = 'https://api.knsdomains.org/mainnet/api/v1';
   static const int knsApiTimeoutSeconds = 10;
   static const int knsDefaultPageSize = 10;
+
+  // Kasplex API Configuration
+  static const String kasplexApiUrl = 'https://api.kasplex.org/v1';
+  static const int kasplexApiTimeoutSeconds = 15;
+
+  // Kaspa.com API Configuration
+  static const String kaspaComApiUrl = 'https://api.kaspa.com';
+  static const int kaspaComApiTimeoutSeconds = 15;
 }
 

@@ -9,6 +9,8 @@ import '../services/kaspa_explorer_client.dart';
 import '../services/wallet_service.dart';
 import '../services/browser_service.dart';
 import '../helpers/url_parsing_helper.dart';
+import '../helpers/url_navigation_helper.dart';
+import '../helpers/bookmark_navigation_helper.dart';
 import '../models/bookmark_models.dart';
 import '../models/browser_models.dart';
 import '../services/bookmark_service.dart';
@@ -17,6 +19,10 @@ import '../panels/ai_assistant_panel.dart';
 import '../panels/bookmark_panel.dart';
 import '../widgets/browser/certificate_info_dialog.dart';
 import '../widgets/browser/add_bookmark_dialog.dart';
+import '../widgets/browser/tab_context_menu_widget.dart';
+import '../widgets/browser/certificate_warning_dialog.dart';
+import '../widgets/browser/browser_loading_widget.dart';
+import '../widgets/browser/browser_error_pages.dart';
 import '../services/settings_service.dart';
 import 'wallets_screen.dart';
 import 'master_password_screen.dart';
@@ -344,91 +350,33 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
     }
   }
   
-  void _showTabContextMenu(BuildContext context, int index, Offset position) {
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    
-    showMenu(
+  void _showTabContextMenu(BuildContext context, int index, Offset position) async {
+    final value = await TabContextMenu.show(
       context: context,
-      position: RelativeRect.fromRect(
-        position & const Size(40, 40),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        const PopupMenuItem(
-          value: 'close',
-          child: Row(
-            children: [
-              Icon(Icons.close, size: 18),
-              SizedBox(width: 8),
-              Text('Close'),
-            ],
-          ),
-        ),
-        if (_tabs.length > 1)
-          const PopupMenuItem(
-            value: 'close_others',
-            child: Row(
-              children: [
-                Icon(Icons.tab, size: 18),
-                SizedBox(width: 8),
-                Text('Close Others'),
-              ],
-            ),
-          ),
-        if (index > 0)
-          const PopupMenuItem(
-            value: 'close_left',
-            child: Row(
-              children: [
-                Icon(Icons.arrow_back, size: 18),
-                SizedBox(width: 8),
-                Text('Close to Left'),
-              ],
-            ),
-          ),
-        if (index < _tabs.length - 1)
-          const PopupMenuItem(
-            value: 'close_right',
-            child: Row(
-              children: [
-                Icon(Icons.arrow_forward, size: 18),
-                SizedBox(width: 8),
-                Text('Close to Right'),
-              ],
-            ),
-          ),
-        const PopupMenuItem(
-          value: 'duplicate',
-          child: Row(
-            children: [
-              Icon(Icons.content_copy, size: 18),
-              SizedBox(width: 8),
-              Text('Duplicate'),
-            ],
-          ),
-        ),
-      ],
-    ).then((value) {
-      if (value == null) return;
-      
-      switch (value) {
-        case 'close':
-          _closeTab(index);
-          break;
-        case 'close_others':
-          _closeOtherTabs(index);
-          break;
-        case 'close_left':
-          _closeTabsToLeft(index);
-          break;
-        case 'close_right':
-          _closeTabsToRight(index);
-          break;
-        case 'duplicate':
-          _duplicateTab(index);
-          break;
-      }
-    });
+      position: position,
+      tabIndex: index,
+      totalTabs: _tabs.length,
+    );
+    
+    if (value == null) return;
+    
+    switch (value) {
+      case 'close':
+        _closeTab(index);
+        break;
+      case 'close_others':
+        _closeOtherTabs(index);
+        break;
+      case 'close_left':
+        _closeTabsToLeft(index);
+        break;
+      case 'close_right':
+        _closeTabsToRight(index);
+        break;
+      case 'duplicate':
+        _duplicateTab(index);
+        break;
+    }
   }
   
   void _createNewTab() {
@@ -454,10 +402,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
   }
 
   void _showLoadingPage(BrowserTab tab, String domain, String status) {
-    tab.controller?.loadData(
-      data: HtmlPages.loadingPage(domain, status),
-      baseUrl: WebUri('about:blank'),
-    );
+    BrowserLoadingWidget.showLoadingPage(tab, domain, status);
   }
 
   void _showEmptyPage(BrowserTab tab) {
@@ -470,12 +415,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
       tab.title = 'New Tab';
     });
     
-    if (tab.controller != null) {
-      tab.controller!.loadData(
-        data: HtmlPages.emptyPage(),
-        baseUrl: WebUri('about:blank'),
-      );
-    }
+    BrowserLoadingWidget.showEmptyPage(tab);
   }
 
   Future<void> _resolveAndLoadDomain(
@@ -578,10 +518,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
           tab.errorMessage = 'No DNS record found for $domain';
         });
         
-        tab.controller?.loadData(
-          data: HtmlPages.noDnsRecordPage(domain),
-          baseUrl: WebUri('about:blank'),
-        );
+        BrowserErrorPages.showNoDnsRecord(tab, domain);
         return;
       }
 
@@ -622,35 +559,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
           tab.isLoading = false;
         });
         
-        final shouldProceed = await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => AlertDialog(
-            backgroundColor: const Color(0xFF1E293B),
-            title: const Row(
-              children: [
-                Icon(Icons.warning_amber_rounded, color: Colors.orange),
-                SizedBox(width: 8),
-                Text('Unsecured Connection', style: TextStyle(color: Colors.white)),
-              ],
-            ),
-            content: Text(
-              'No valid SSL certificate found for $domain.\n\nYour connection to this site is not secure. Do you want to proceed?',
-              style: const TextStyle(color: Colors.white70),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Go Back', style: TextStyle(color: Colors.grey)),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-                child: const Text('Proceed Anyway', style: TextStyle(color: Colors.white)),
-              ),
-            ],
-          ),
-        );
+        final shouldProceed = await CertificateWarningDialog.show(context, domain);
         
         if (shouldProceed != true) {
           _showEmptyPage(tab);
@@ -680,10 +589,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
       tab.title = 'New Tab';
     });
     
-    tab.controller?.loadData(
-      data: HtmlPages.domainNotFoundPage(domain),
-      baseUrl: WebUri('about:blank'),
-    );
+    BrowserErrorPages.showDomainNotFound(tab, domain);
   }
 
   void _showDomainNotConfirmedPage(BrowserTab tab, String domain) {
@@ -696,11 +602,8 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
       tab.title = 'New Tab';
     });
     
-    tab.controller?.loadData(
-      data: HtmlPages.domainNotConfirmedPage(domain),
-      baseUrl: WebUri('about:blank'),
-    );
-    }
+    BrowserErrorPages.showDomainNotConfirmed(tab, domain);
+  }
 
   Future<void> _goBack() async {
     final tab = _currentTab;
@@ -822,17 +725,11 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
       return;
     }
 
-    // Normalize URL (add scheme if missing) before parsing
-    url = UrlParsingHelper.normalizeUrl(url);
-    print('🌐 Navigation: Processing URL: $url');
-    
-    // Parse URL to extract the host/domain properly
-    ParsedUrl parsed;
-    try {
-      parsed = UrlParsingHelper.parseUrl(url);
-    } catch (e) {
-      // Invalid URL format
-      if (tab.controller != null) {
+    // Use the navigation helper to validate and parse the URL
+    final parsed = await UrlNavigationHelper.validateAndParseUrl(
+      url: url,
+      tab: tab,
+      onInvalidUrl: () {
         setState(() {
           tab.isLoading = false;
           tab.isLoadingPage = false;
@@ -840,20 +737,16 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
           tab.currentDomain = null;
           tab.errorMessage = 'Invalid URL format';
         });
-        await tab.controller!.loadData(
-          data: HtmlPages.domainNotSupportedPage(url),
-          baseUrl: WebUri('about:blank'),
-        );
-      }
-      return;
-    }
+      },
+    );
     
-    // Check if it's a KNS domain - only .kas domains are allowed
-    final isKns = UrlParsingHelper.isKnsDomain(parsed.host);
+    if (parsed == null) return;
     
-    if (!isKns) {
-      // Show error page for non-.kas domains
-      if (tab.controller != null) {
+    // Use the helper to validate KNS domain
+    final isValid = await UrlNavigationHelper.validateKnsDomain(
+      parsed: parsed,
+      tab: tab,
+      onInvalidDomain: () {
         setState(() {
           tab.isLoading = false;
           tab.isLoadingPage = false;
@@ -861,15 +754,12 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
           tab.currentDomain = null;
           tab.errorMessage = 'Only .kas domains are supported';
         });
-        await tab.controller!.loadData(
-          data: HtmlPages.domainNotSupportedPage(parsed.host),
-          baseUrl: WebUri('about:blank'),
-        );
-      }
-      return;
-    }
+      },
+    );
     
-    // Parse for KNS domain resolution
+    if (!isValid) return;
+    
+    // Start KNS domain resolution
     print('🔍 Navigation: Starting KNS resolution for domain: ${parsed.host}');
     await _resolveAndLoadDomain(
       parsed.host,
@@ -923,11 +813,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
                           print('❌ Navigation: Certificate validation FAILED for $host. Potential MITM attack blocked.');
                           
                           // Show error page
-                          controller.loadData(
-                            data: HtmlPages.certificateErrorPage(host),
-                            mimeType: 'text/html',
-                            encoding: 'utf-8',
-                          );
+                          BrowserErrorPages.showCertificateError(currentTab, host);
                           
                           return ServerTrustAuthResponse(
                             action: ServerTrustAuthResponseAction.CANCEL,
@@ -947,12 +833,8 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
                          print('🛑 Navigation: Blocking connection to $host - KNS domain without valid pinned certificate verification');
                          
                          // Show error page
-                          controller.loadData(
-                            data: HtmlPages.certificateErrorPage(host),
-                            mimeType: 'text/html',
-                            encoding: 'utf-8',
-                          );
-                          
+                         BrowserErrorPages.showCertificateError(currentTab, host);
+                         
                          return ServerTrustAuthResponse(
                             action: ServerTrustAuthResponseAction.CANCEL,
                           );
@@ -1024,10 +906,7 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
                     
                     // Show error page instead of just error message
                     final domain = _tabs[tabIndex].currentDomain ?? 'the server';
-                    controller.loadData(
-                      data: HtmlPages.connectionErrorPage(domain, errorType, errorDetails),
-                      baseUrl: WebUri('about:blank'),
-                    );
+                    BrowserErrorPages.showConnectionError(_tabs[tabIndex], domain, errorType, errorDetails);
                     
                     setState(() {
                       _tabs[tabIndex].isLoading = false;
@@ -1175,68 +1054,19 @@ class _BrowserPageState extends State<BrowserPage> with WindowListener {
                       await _deleteBookmark(id);
                     },
                     onNavigateToUrl: (url) async {
-                      // Load bookmark URL
-                      _currentTab.urlController.text = url;
-                                setState(() {
-                                  _isBookmarkPanelOpen = false;
-                                });
-                      
-                      // Normalize URL before parsing
-                      final normalizedUrl = UrlParsingHelper.normalizeUrl(url);
-                      
-                      // Parse URL to extract the host/domain properly
-                      ParsedUrl parsed;
-                      try {
-                        parsed = UrlParsingHelper.parseUrl(normalizedUrl);
-                      } catch (e) {
-                        // Invalid URL format
-                        if (_currentTab.controller != null) {
+                      await BookmarkNavigationHelper.navigateToBookmark(
+                        context: context,
+                        url: url,
+                        tab: _currentTab,
+                        urlController: _currentTab.urlController,
+                        onResolveAndLoad: _resolveAndLoadDomain,
+                        onNavigationStarted: () {
                           setState(() {
-                            _currentTab.isLoading = false;
-                            _currentTab.isLoadingPage = false;
-                            _currentTab.currentUrl = '';
-                            _currentTab.currentDomain = null;
-                            _currentTab.errorMessage = 'Invalid URL format';
+                            _isBookmarkPanelOpen = false;
                           });
-                          await _currentTab.controller!.loadData(
-                            data: HtmlPages.domainNotSupportedPage(url),
-                            baseUrl: WebUri('about:blank'),
-                          );
-                        }
-                        return;
-                      }
-                      
-                      // Check if it's a KNS domain - only .kas domains are allowed
-                      final isKns = UrlParsingHelper.isKnsDomain(parsed.host);
-                      
-                      if (!isKns) {
-                        // Show error page for non-.kas domains
-                        if (_currentTab.controller != null) {
-                                      setState(() {
-                            _currentTab.isLoading = false;
-                            _currentTab.isLoadingPage = false;
-                            _currentTab.currentUrl = '';
-                            _currentTab.currentDomain = null;
-                            _currentTab.errorMessage = 'Only .kas domains are supported';
-                          });
-                          await _currentTab.controller!.loadData(
-                            data: HtmlPages.domainNotSupportedPage(parsed.host),
-                            baseUrl: WebUri('about:blank'),
-                          );
-                        }
-                        return;
-                      }
-                      
-                      // Parse and resolve KNS domain
-                      await _resolveAndLoadDomain(
-                        parsed.host,
-                        path: parsed.path,
-                        scheme: parsed.scheme ?? 'https',
-                        port: parsed.port ?? 443,
-                        queryParameters: parsed.queryParameters,
-                        fragment: parsed.fragment,
+                        },
                       );
-                                    },
+                    },
                     onClose: () {
                       setState(() {
                         _isBookmarkPanelOpen = false;
